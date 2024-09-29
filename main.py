@@ -11,6 +11,9 @@ from pdf2image import convert_from_bytes
 from PIL import Image
 from llama_index.core import VectorStoreIndex, load_index_from_storage, SimpleDirectoryReader, Settings
 from llama_index.core.storage.storage_context import StorageContext
+from concurrent.futures import ThreadPoolExecutor
+
+USE_THREADS=0
 
 default_prompt = "Provide keywords and summary on a document. Use ukrainian language. Result should be in json format with fields 'keywords' and 'summary'."
 
@@ -38,11 +41,56 @@ def query_llama_index(index, query_text=default_prompt):
 def ocr_image(image):
     return pytesseract.image_to_string(image, lang='ukr')
 
+def ocr_images_without_threads(images):
+    ocr_start_time = time.time()
+    print("OCR started")
+
+    # Perform OCR
+    ocr_text = ""
+    for img in images:
+        text = ocr_image(img)
+        ocr_text += text + "\n"
+
+    ocr_end_time = time.time()
+    duration = ocr_end_time - ocr_start_time
+    print(f"OCR finished. Time: {duration}s.")
+
+    return ocr_text
+
+def ocr_images_with_threads(images):
+    cpu_count = os.cpu_count()
+    chunk_size = cpu_count if len(images) >= cpu_count else len(images)
+
+    ocr_start_time = time.time()
+    print(f"OCR started with threading, cpu_count={cpu_count} chunk_size={chunk_size}")
+
+    ocr_text = [""] * len(images)  # Initialize a list to store results in order
+
+    with ThreadPoolExecutor() as executor:
+        futures = []
+        for i in range(0, len(images), chunk_size):
+            chunk = images[i:i + chunk_size]
+            futures.append(executor.submit(lambda chunk, start_index=i: [(start_index + j, ocr_image(img)) for j, img in enumerate(chunk)], chunk))
+
+        for future in futures:
+            results = future.result()
+            for index, text in results:
+                ocr_text[index] = text  # Place the result in the correct order
+
+    ocr_text = "\n".join(ocr_text)
+
+    ocr_end_time = time.time()
+    duration = ocr_end_time - ocr_start_time
+    print(f"OCR finished. Time: {duration}s.")
+
+    return ocr_text
+
+def ocr_images(images):
+    return ocr_images_with_threads(images) if USE_THREADS else ocr_images_without_threads(images)
+
 # Route to upload PDF/PNG and process it
 @app.post("/upload")
-async def upload_file(file: UploadFile):
-    print(file.content_type)
-
+async def upload_file(file: UploadFile, ocr_only: int = 0):
     # Generate a unique ID for the file
     unique_id = str(uuid.uuid4())
     ocr_result_path = f"debug/ocr-result-{unique_id}.txt"
@@ -58,20 +106,7 @@ async def upload_file(file: UploadFile):
     else:
         return {"message": "Unsupported file format. Please upload a PDF or PNG."}
 
-    print(3)
-
-    ocr_start_time = time.time()
-    print("OCR started")
-
-    # Perform OCR
-    ocr_text = ""
-    for img in images:
-        text = pytesseract.image_to_string(img, lang='ukr')  # Assuming Ukrainian
-        ocr_text += text + "\n"
-
-    ocr_end_time = time.time()
-    duration = ocr_end_time - ocr_start_time
-    print(f"OCR finished. Time: {duration}s.")
+    ocr_text = ocr_images(images) if len(images) > 1 else ocr_image(images[0])
 
     # Write the raw OCR result to a file
     with open(ocr_result_path, "w", encoding="utf-8") as f:
@@ -81,6 +116,11 @@ async def upload_file(file: UploadFile):
     cleaned_text = remove_hyphenation(ocr_text)
     with open(document_path, "w", encoding="utf-8") as f:
         f.write(cleaned_text)
+
+    if ocr_only:
+        print('ocr_only is not 0, skipping AI part')
+
+        return {"id": unique_id}
 
     # Vectorize document
     documents = SimpleDirectoryReader(input_files=[document_path]).load_data()
