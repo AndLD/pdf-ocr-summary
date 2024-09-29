@@ -13,7 +13,9 @@ from llama_index.core import VectorStoreIndex, load_index_from_storage, SimpleDi
 from llama_index.core.storage.storage_context import StorageContext
 from concurrent.futures import ThreadPoolExecutor
 
-USE_THREADS=0
+USE_THREADS = int(os.getenv("USE_THREADS") or 1)
+MAX_CHUNKS = int(os.getenv("MAX_CHUNKS") or (os.cpu_count() // 2))
+IMAGES_PER_CHUNK = int(os.getenv("IMAGES_PER_CHUNK") or 4)
 
 default_prompt = "Provide keywords and summary on a document. Use ukrainian language. Result should be in json format with fields 'keywords' and 'summary'."
 
@@ -45,7 +47,6 @@ def ocr_images_without_threads(images):
     ocr_start_time = time.time()
     print("OCR started")
 
-    # Perform OCR
     ocr_text = ""
     for img in images:
         text = ocr_image(img)
@@ -58,11 +59,10 @@ def ocr_images_without_threads(images):
     return ocr_text
 
 def ocr_images_with_threads(images):
-    cpu_count = os.cpu_count()
-    chunk_size = cpu_count if len(images) >= cpu_count else len(images)
+    chunk_size = min(MAX_CHUNKS, len(images) // IMAGES_PER_CHUNK)
 
     ocr_start_time = time.time()
-    print(f"OCR started with threading, cpu_count={cpu_count} chunk_size={chunk_size}")
+    print(f"OCR started with threading, len(images)={len(images)} cpu_count={os.cpu_count()} chunk_size={chunk_size}")
 
     ocr_text = [""] * len(images)  # Initialize a list to store results in order
 
@@ -86,7 +86,7 @@ def ocr_images_with_threads(images):
     return ocr_text
 
 def ocr_images(images):
-    return ocr_images_with_threads(images) if USE_THREADS else ocr_images_without_threads(images)
+    return ocr_images_with_threads(images) if USE_THREADS and len(images) > IMAGES_PER_CHUNK else ocr_images_without_threads(images)
 
 # Route to upload PDF/PNG and process it
 @app.post("/upload")
@@ -118,7 +118,7 @@ async def upload_file(file: UploadFile, ocr_only: int = 0):
         f.write(cleaned_text)
 
     if ocr_only:
-        print('ocr_only is not 0, skipping AI part')
+        print('ocr_only is set, skipping AI part')
 
         return {"id": unique_id}
 
